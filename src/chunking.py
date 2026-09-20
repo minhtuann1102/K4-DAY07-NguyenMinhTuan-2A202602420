@@ -47,8 +47,18 @@ class SentenceChunker:
         self.max_sentences_per_chunk = max(1, max_sentences_per_chunk)
 
     def chunk(self, text: str) -> list[str]:
-        # TODO: split into sentences, group into chunks
-        raise NotImplementedError("Implement SentenceChunker.chunk")
+        if not text:
+            return []
+        raw_sentences = re.split(r"(?<=[.!?])\s+|(?<=\.)\n+", text.strip())
+        sentences = [s.strip() for s in raw_sentences if s.strip()]
+        if not sentences:
+            return []
+
+        chunks: list[str] = []
+        for i in range(0, len(sentences), self.max_sentences_per_chunk):
+            group = sentences[i : i + self.max_sentences_per_chunk]
+            chunks.append(" ".join(group).strip())
+        return chunks
 
 
 class RecursiveChunker:
@@ -66,12 +76,103 @@ class RecursiveChunker:
         self.chunk_size = chunk_size
 
     def chunk(self, text: str) -> list[str]:
-        # TODO: implement recursive splitting strategy
-        raise NotImplementedError("Implement RecursiveChunker.chunk")
+        if not text:
+            return []
+        return self._split(text, self.separators)
 
     def _split(self, current_text: str, remaining_separators: list[str]) -> list[str]:
-        # TODO: recursive helper used by RecursiveChunker.chunk
-        raise NotImplementedError("Implement RecursiveChunker._split")
+        if len(current_text) <= self.chunk_size:
+            return [current_text] if current_text else []
+        if not remaining_separators:
+            return [current_text[i : i + self.chunk_size] for i in range(0, len(current_text), self.chunk_size)]
+
+        sep = remaining_separators[0]
+        next_seps = remaining_separators[1:]
+
+        if sep == "":
+            splits = list(current_text)
+        else:
+            splits = current_text.split(sep)
+
+        if len(splits) <= 1:
+            return self._split(current_text, next_seps)
+
+        chunks: list[str] = []
+        buffer = ""
+        for piece in splits:
+            if len(piece) > self.chunk_size:
+                if buffer:
+                    chunks.append(buffer)
+                    buffer = ""
+                chunks.extend(self._split(piece, next_seps))
+            else:
+                candidate = (buffer + sep + piece) if buffer else piece
+                if len(candidate) <= self.chunk_size:
+                    buffer = candidate
+                else:
+                    if buffer:
+                        chunks.append(buffer)
+                    buffer = piece
+        if buffer:
+            chunks.append(buffer)
+        return [c for c in chunks if c]
+
+
+class HeadingChunker:
+    """
+    Split Markdown text into chunks by heading boundaries.
+
+    Each chunk starts at a Markdown heading line (``#``, ``##``, ``###``, …)
+    and contains all content until the next heading of the same or higher
+    level.  The heading itself is preserved as the first line of the chunk
+    so that the chunk remains self-contained (e.g. "## 2. Thời gian phản
+    hồi\\n…").
+
+    If the document has no headings, the whole text is returned as a single
+    chunk.
+
+    Parameters
+    ----------
+    min_heading_level : int
+        Only treat heading lines whose ``#``-depth is ≤ this value as split
+        points.  Default 3 means ``#``, ``##``, and ``###`` all trigger a
+        split; ``####`` and deeper are kept inside the current chunk.
+    """
+
+    def __init__(self, min_heading_level: int = 3) -> None:
+        self.min_heading_level = max(1, min_heading_level)
+        self._heading_re = re.compile(
+            r"^(#{1," + str(self.min_heading_level) + r"})\s+.+", re.MULTILINE
+        )
+
+    def chunk(self, text: str) -> list[str]:
+        if not text:
+            return []
+
+        lines = text.splitlines(keepends=True)
+        chunks: list[str] = []
+        current: list[str] = []
+
+        for line in lines:
+            if self._heading_re.match(line.rstrip("\n\r")):
+                # flush the previous section
+                section = "".join(current).strip()
+                if section:
+                    chunks.append(section)
+                current = [line]
+            else:
+                current.append(line)
+
+        # flush the last section
+        section = "".join(current).strip()
+        if section:
+            chunks.append(section)
+
+        # If no headings were found, return the whole text as one chunk
+        if not chunks:
+            return [text.strip()] if text.strip() else []
+
+        return chunks
 
 
 def _dot(a: list[float], b: list[float]) -> float:
@@ -86,13 +187,30 @@ def compute_similarity(vec_a: list[float], vec_b: list[float]) -> float:
 
     Returns 0.0 if either vector has zero magnitude.
     """
-    # TODO: implement cosine similarity formula
-    raise NotImplementedError("Implement compute_similarity")
+    mag_a = math.sqrt(sum(x * x for x in vec_a))
+    mag_b = math.sqrt(sum(y * y for y in vec_b))
+    if mag_a == 0.0 or mag_b == 0.0:
+        return 0.0
+    return _dot(vec_a, vec_b) / (mag_a * mag_b)
 
 
 class ChunkingStrategyComparator:
     """Run all built-in chunking strategies and compare their results."""
 
     def compare(self, text: str, chunk_size: int = 200) -> dict:
-        # TODO: call each chunker, compute stats, return comparison dict
-        raise NotImplementedError("Implement ChunkingStrategyComparator.compare")
+        strategies = {
+            "fixed_size": FixedSizeChunker(chunk_size=chunk_size, overlap=20).chunk(text),
+            "by_sentences": SentenceChunker(max_sentences_per_chunk=3).chunk(text),
+            "recursive": RecursiveChunker(chunk_size=chunk_size).chunk(text),
+            "by_headings": HeadingChunker(min_heading_level=3).chunk(text),
+        }
+        result = {}
+        for name, chunks in strategies.items():
+            count = len(chunks)
+            avg_length = sum(len(c) for c in chunks) / count if count > 0 else 0.0
+            result[name] = {
+                "chunks": chunks,
+                "count": count,
+                "avg_length": avg_length,
+            }
+        return result
